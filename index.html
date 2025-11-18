@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文舟 - 數位雨 (p5.js + 水波紋 + 音效)</title>
+    <!-- 載入 Tailwind CSS --><script src="https://cdn.tailwindcss.com"></script>
+    <!-- 載入 p5.js 函式庫 (繪圖/動畫) --><script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
+    <!-- 載入 Tone.js 函式庫 (音效/音樂) --><script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+    
+    <style>
+        /* 設置 Inter 字體 */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            overflow: hidden; /* 防止滾動條出現 */
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            width: 100vw;
+            background-color: black; /* 確保背景為黑色 */
+        }
+
+        /* 確保 p5.js 創建的 Canvas 填滿整個視窗並位於背景層 */
+        canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            z-index: 10; /* 背景層 */
+            filter: blur(1px); /* 為水波紋效果增加一點模糊，使其看起來更柔和 */
+        }
+
+        /* 前景內容容器 */
+        #content {
+            position: relative;
+            z-index: 20; /* 前景層，位於 Canvas 之上 */
+            height: 100vh;
+            width: 100vw;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            pointer-events: none; /* 讓點擊事件穿透到後面的元素 */
+        }
+
+        /* 標題文字樣式 */
+        .title-text {
+            /* 霓虹藍色 */
+            color: #00FFFF;
+            font-weight: 900;
+            /* 藍色發光效果 */
+            text-shadow: 0 0 15px rgba(0, 255, 255, 0.9), 0 0 25px rgba(0, 255, 255, 0.5); 
+            line-height: 0.9; /* 減少行高，讓上下兩字更靠近 */
+            transition: color 0.3s ease;
+        }
+        
+        /* 響應式字體大小調整 */
+        .text-huge {
+            font-size: 8rem; /* 預設大字體 */
+        }
+        @media (min-width: 640px) {
+            .text-huge {
+                font-size: 12rem;
+            }
+        }
+        @media (min-width: 1024px) {
+            .text-huge {
+                font-size: 16rem;
+            }
+        }
+        
+        /* 音效提示文字樣式 */
+        #sound-notice {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(0, 255, 255, 0.7);
+            font-size: 0.9rem;
+            pointer-events: none;
+            opacity: 1;
+            transition: opacity 1s ease-out;
+            padding: 5px 10px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 5px;
+        }
+        .hidden {
+            opacity: 0 !important;
+        }
+    </style>
+</head>
+<body class="bg-black">
+
+    <!-- 2. 前景中央的文字內容 --><div id="content">
+        <div class="title-text text-huge">
+            石
+        </div>
+        <!-- 調整間距，讓中文字符看起來更平衡 -->
+        <div class="title-text text-huge -mt-4">
+            門
+        </div>
+        <div id="sound-notice" class="">點擊畫布任意位置以啟動環境音效</div>
+    </div>
+
+    <!-- 1. p5.js 繪製數位雨和水波紋的腳本 --><script>
+        // Firebase 全域變數檢查 (不使用，但保留以符合環境規範)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        
+        // --- 數位雨相關變數 ---
+        const katakana = "アァカサタナハマヤラワガザダバパ" +
+                         "イィキシチニヒミリヰギジヂビピ" +
+                         "ウゥクスツヌフムユルグズブヅプ" +
+                         "エェケセテネヘメレヱゲゼデベペ" +
+                         "オォコソトノホモヨロヲゴゾドボポ" +
+                         "ヴッン0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let drops = []; 
+        const symbolSize = 20; 
+
+        // --- 水波紋相關變數 ---
+        let currentBuffer; // 儲存當前波紋狀態的緩衝區
+        let prevBuffer;    // 儲存前一個波紋狀態的緩衝區 (用於計算擴散)
+        const dampening = 0.98; // 衰減係數，控制波紋的消失速度
+        let rippleResolution = 4; // 波紋網格的解析度 (數值越小，波紋越精細，但運算量越大)
+        let waveWidth, waveHeight; // 波紋網格的寬高
+        let audioStarted = false; // 追蹤音效是否已啟動
+
+        // --- Tone.js 音訊設定 ---
+        let ambientSynth;
+        let reverb;
+        let autoFilter;
+        let ambientLoop;
+
+        // 初始化 Tone.js
+        function setupAudio() {
+            // *** 設置主音量為 -20dB，確保空靈感和不干擾背景 ***
+            Tone.Master.volume.value = -20; 
+
+            // 1. 效果鍊: Reverb -> AutoFilter -> Master Output
+            reverb = new Tone.Reverb({
+                decay: 10, // 增加衰減時間，創造廣闊的空間感
+                preDelay: 0.01,
+                wet: 0.8 // 提高濕度，增加空靈感
+            }).toDestination();
+            
+            autoFilter = new Tone.AutoFilter({
+                frequency: "8n", 
+                depth: 0.3, // 降低深度，讓濾波器效果更柔和
+                baseFrequency: 200,
+                octaves: 2.6
+            }).connect(reverb);
+            autoFilter.start();
+
+            // 2. 合成器: 使用 Triangle 波形，聲音更柔和空靈
+            ambientSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "triangle" }, // 改為三角波
+                envelope: {
+                    attack: 2, 
+                    decay: 1, 
+                    sustain: 0.5, 
+                    release: 4 
+                },
+            }).connect(autoFilter);
+            
+            // 3. 循環: 保持 C3/G2/D#3/A#2 的緩慢和弦進行，符合空靈氛圍
+            const notes = ["C3", "G2", "D#3", "A#2"];
+            let noteIndex = 0;
+            ambientLoop = new Tone.Loop(time => {
+                const note = notes[noteIndex % notes.length];
+                ambientSynth.triggerAttackRelease(note, "4n", time);
+                noteIndex++;
+            }, "2m").start(0); 
+            
+            console.log("Tone.js audio setup complete: Ethereal mode.");
+        }
+
+        // 啟動音訊 (在使用者點擊後調用)
+        async function startAudio() {
+            if (audioStarted) return;
+            console.log("Attempting to start audio context and setting up Tone.js...");
+
+            try {
+                // 必須先調用 Tone.start()
+                await Tone.start(); 
+                
+                // 設置並啟動音效
+                setupAudio();
+                
+                // *** 確保 Tone.js 的時間控制器運行，這對 Loop 很重要 ***
+                Tone.Transport.start(); 
+
+                console.log("Tone.js Audio Context and Transport started successfully. Sound should be playing now.");
+                audioStarted = true;
+                
+                // 隱藏提示文字
+                const notice = document.getElementById('sound-notice');
+                if (notice) {
+                    notice.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error("Failed to start audio context:", error);
+                // 顯示錯誤訊息給使用者
+                const notice = document.getElementById('sound-notice');
+                if (notice) {
+                    notice.innerHTML = '音效啟動失敗。請檢查控制台錯誤。';
+                }
+            }
+        }
+
+
+        // p5.js 的初始化函數 (只執行一次)
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            const canvasElement = select('canvas');
+            canvasElement.parent(document.body);
+            
+            noStroke(); 
+            textSize(symbolSize); 
+            frameRate(30); 
+            
+            // 初始化數位雨的 drops 陣列
+            const totalColumns = floor(width / symbolSize);
+            for (let i = 0; i < totalColumns; i++) {
+                drops[i] = random(0, -height / symbolSize); 
+            }
+
+            // 初始化水波紋緩衝區
+            initRippleBuffers();
+
+            // 修正：將音訊啟動邏輯附加到整個 document body，確保在使用者在頁面上的任何點擊都被捕捉到
+            document.body.addEventListener('click', () => {
+                if (!audioStarted) {
+                    console.log("Document Body click detected. Starting audio.");
+                    startAudio();
+                }
+            }, { once: true }); // 只執行一次
+
+            console.log("p5.js setup finished. Audio activation listener attached to document body.");
+        }
+
+        // 初始化/重置水波紋緩衝區
+        function initRippleBuffers() {
+            waveWidth = floor(width / rippleResolution);
+            waveHeight = floor(height / rippleResolution);
+
+            currentBuffer = new Array(waveWidth * waveHeight).fill(0);
+            prevBuffer = new Array(waveWidth * waveHeight).fill(0);
+        }
+
+        // p5.js 的繪圖循環函數 (每幀執行一次)
+        function draw() {
+            // --- 數位雨繪製 ---
+            background(0, 5); // 繪製半透明黑色背景，製造文字殘影
+            fill('#00FF41'); // 設置文字顏色為駭客任務綠
+            
+            for (let i = 0; i < drops.length; i++) {
+                const x = i * symbolSize;
+                let y = drops[i] * symbolSize;
+
+                const textChar = katakana.charAt(floor(random(katakana.length)));
+                text(textChar, x, y);
+
+                drops[i]++;
+
+                if (y > height && random(1) > 0.975) {
+                    drops[i] = 0;
+                }
+            }
+
+            // --- 水波紋模擬和渲染 ---
+
+            // 檢查滑鼠是否在 Canvas 範圍內
+            if (mouseX >= 0 && mouseX < width && mouseY >= 0 && mouseY < height) {
+                // 當滑鼠移動時，在滑鼠位置產生一個擾動 (水滴)
+                let dropX = floor(mouseX / rippleResolution);
+                let dropY = floor(mouseY / rippleResolution);
+                let dropIndex = dropX + dropY * waveWidth;
+                
+                // 檢查索引是否有效
+                if (dropIndex >= 0 && dropIndex < currentBuffer.length) {
+                    // 隨機設置一個擾動值，讓波紋更自然
+                    currentBuffer[dropIndex] = random(200, 255); 
+                }
+            }
+
+            loadPixels(); // 載入畫布像素，準備進行直接操作
+
+            for (let i = 1; i < waveWidth - 1; i++) {
+                for (let j = 1; j < waveHeight - 1; j++) {
+                    let index = i + j * waveWidth;
+                    
+                    // 計算波紋擴散 (核心算法)
+                    currentBuffer[index] = 
+                        (prevBuffer[index - 1] + 
+                         prevBuffer[index + 1] + 
+                         prevBuffer[index - waveWidth] + 
+                         prevBuffer[index + waveWidth]) / 2 - currentBuffer[index];
+                    
+                    // 應用衰減
+                    currentBuffer[index] *= dampening;
+
+                    // 將波紋高度映射到像素亮度，並更新畫布像素
+                    let pixelValue = currentBuffer[index];
+
+                    // 將波紋效果應用到數位雨的綠色
+                    let sourceX = i * rippleResolution;
+                    let sourceY = j * rippleResolution;
+                    
+                    // 遍歷 rippleResolution * rippleResolution 範圍內的像素
+                    for (let px = 0; px < rippleResolution; px++) {
+                        for (let py = 0; py < rippleResolution; py++) {
+                            let actualX = sourceX + px;
+                            let actualY = sourceY + py;
+
+                            if (actualX < width && actualY < height) {
+                                let d = pixelDensity();
+                                // 獲取像素索引
+                                let pixIndex = (actualX + actualY * width) * 4 * d;
+                                
+                                // 獲取數位雨的基礎綠色值
+                                let g = pixels[pixIndex + 1]; // 綠色通道
+
+                                // 根據波紋值調整綠色亮度
+                                let brightnessAdjust = map(pixelValue, -255, 255, -80, 80);
+                                g = constrain(g + brightnessAdjust, 0, 255); // 限制在 0-255
+
+                                pixels[pixIndex] = 0;     // 紅色
+                                pixels[pixIndex + 1] = g; // 調整後的綠色
+                                pixels[pixIndex + 2] = 0;     // 藍色
+                                pixels[pixIndex + 3] = 255;   // Alpha
+                            }
+                        }
+                    }
+                }
+            }
+            updatePixels(); // 將修改後的像素數據寫回畫布
+
+            // 交換緩衝區，準備下一幀
+            let temp = prevBuffer;
+            prevBuffer = currentBuffer;
+            currentBuffer = temp;
+        }
+
+        // p5.js 的視窗大小調整函數 (當視窗大小改變時自動執行)
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+            
+            // 重新計算數位雨的列數並調整 drops 陣列大小
+            const newColumns = floor(width / symbolSize);
+            if (newColumns !== drops.length) {
+                while (drops.length < newColumns) {
+                    drops.push(random(0, -height / symbolSize)); 
+                }
+                drops.length = newColumns; 
+            }
+
+            // 重置水波紋緩衝區
+            initRippleBuffers();
+        }
+    </script>
+</body>
+</html>
